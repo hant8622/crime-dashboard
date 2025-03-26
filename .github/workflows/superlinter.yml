@@ -1,0 +1,79 @@
+name: Deploy Flask App
+
+on:
+  push:
+    branches:
+      - master  # or 'main'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name:  Checkout code
+      uses: actions/checkout@v3
+
+    - name:  Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name:  Install dependencies (validate build)
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name:  Save private key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > key.pem
+        chmod 600 key.pem
+
+    - name:  Check if Parent Directory Exists and Create Project Folder on EC2
+      run: |
+        ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@3.106.114.66 << 'EOF'
+          echo "📁 Checking if /home/ubuntu exists..."
+          if [ ! -d "/home/ubuntu" ]; then
+            sudo mkdir -p /home/ubuntu
+          fi
+          echo "📁 Creating /home/ubuntu/crime-dashboard..."
+          sudo mkdir -p /home/ubuntu/crime-dashboard
+          sudo chown -R ubuntu:ubuntu /home/ubuntu/crime-dashboard
+          echo "✅ Folder created and permissions set!"
+        EOF
+
+    # 🔄 ROLLBACK Backup Step
+    - name: 🔄 Backup existing deployment
+      run: |
+        ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@3.106.114.66 << 'EOF'
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          if [ -d "/home/ubuntu/crime-dashboard" ]; then
+            cp -r /home/ubuntu/crime-dashboard /home/ubuntu/crime-dashboard-backup-$TIMESTAMP
+            echo "✅ Backup created: crime-dashboard-backup-$TIMESTAMP"
+          else
+            echo "⚠️ No existing project folder to backup."
+          fi
+        EOF
+
+    - name:  Copy project files to EC2
+      run: |
+        rsync -avz \
+          -e "ssh -o StrictHostKeyChecking=no -i key.pem" \
+          --exclude '.git' \
+          --exclude '.github' \
+          --exclude 'key.pem' \
+          ./ \
+          ubuntu@3.106.114.66:/home/ubuntu/crime-dashboard/
+
+    - name:  Restart Flask App
+      run: |
+        ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@3.106.114.66 << 'EOF'
+          cd /home/ubuntu/crime-dashboard
+          if [ ! -d ".venv" ]; then
+            python3 -m venv .venv
+          fi
+          source .venv/bin/activate
+          pip install -r requirements.txt
+          pkill -f "flask run" || true
+          nohup flask run --host=0.0.0.0 --port=5000 > app.log 2>&1 &
+          echo "✅ Flask app restarted!"
+        EOF
